@@ -316,6 +316,80 @@ async function run() {
         res.status(500).send({ message: 'Internal Server Error' });
       }
     });
+
+    // ===============================================
+    // 📋 EVENT REGISTRATION ROUTES
+    // ✅ FIX: eventTitle সহ সব field save হচ্ছে (free & paid)
+    // ===============================================
+
+    app.post('/event-registrations', verifyFBToken, async (req, res) => {
+      try {
+        const registration = req.body;
+        const { eventId, userEmail } = registration;
+
+        if (!eventId || !userEmail)
+          return res.status(400).send({ message: 'Missing required fields.' });
+
+        const existing = await eventRegistrationsCollection.findOne({
+          eventId,
+          userEmail,
+        });
+        if (existing)
+          return res.status(409).send({ message: 'Already registered.' });
+
+        let eventTitle = registration.eventTitle || '';
+        if (!eventTitle && ObjectId.isValid(eventId)) {
+          const eventDoc = await eventsCollection.findOne({
+            _id: new ObjectId(eventId),
+          });
+          eventTitle = eventDoc?.eventTitle || eventDoc?.title || '';
+        }
+
+        const registrationData = {
+          ...registration,
+          eventTitle, // ✅ eventTitle সহ save
+          registeredAt: registration.registeredAt || new Date().toISOString(),
+          paymentType: registration.paymentType || 'free', // ✅ free বা paid
+        };
+
+        const result =
+          await eventRegistrationsCollection.insertOne(registrationData);
+        res.send({
+          success: true,
+          message: 'Event registered successfully!',
+          data: result,
+        });
+      } catch (error) {
+        res.status(500).send({ message: 'Internal server error', error });
+      }
+    });
+
+    app.get('/event-registrations', verifyFBToken, async (req, res) => {
+      try {
+        const result = await eventRegistrationsCollection.find().toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'Server error' });
+      }
+    });
+
+    app.get(
+      '/event-registrations/:eventId',
+      verifyFBToken,
+      async (req, res) => {
+        try {
+          const eventId = req.params.eventId;
+          const registrations = await eventRegistrationsCollection
+            .find({ eventId })
+            .sort({ registeredAt: -1 })
+            .toArray();
+          res.send(registrations);
+        } catch (error) {
+          console.error('Error fetching attendee list:', error);
+          res.status(500).send({ message: 'Internal Server Error', error });
+        }
+      },
+    );
     console.log('✅ Routes loaded');
   } catch (err) {
     console.error('❌ MongoDB Error:', err);
