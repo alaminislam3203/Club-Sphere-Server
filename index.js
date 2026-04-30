@@ -1036,6 +1036,60 @@ async function run() {
           .send({ message: 'Error fetching payment history', error });
       }
     });
+
+    app.get('/admin-stats', verifyFBToken, async (req, res) => {
+      try {
+        const revenueResult = await paymentCollection
+          .aggregate([
+            {
+              $group: {
+                _id: null,
+                totalRevenue: { $sum: { $toDouble: '$amount' } },
+              },
+            },
+          ])
+          .toArray();
+        const totalRevenue =
+          revenueResult.length > 0 ? revenueResult[0].totalRevenue : 0;
+        const totalUsers = await usersCollection.countDocuments();
+        const totalEvents = await eventsCollection.countDocuments();
+        const totalMemberships =
+          await clubMembershipCollection.countDocuments();
+        const approvedClubs = await clubsCollection.countDocuments({
+          status: 'approved',
+        });
+        const pendingClubs = await clubsCollection.countDocuments({
+          status: 'pending',
+        });
+        const rejectedClubs = await clubsCollection.countDocuments({
+          status: 'rejected',
+        });
+        const membershipsPerClub = await clubsCollection
+          .aggregate([
+            { $group: { _id: '$category', count: { $sum: 1 } } },
+            { $project: { _id: 0, name: '$_id', count: 1 } },
+          ])
+          .toArray();
+        res.send({
+          totalRevenue,
+          totalUsers,
+          totalEvents,
+          totalMemberships,
+          clubsByStatus: {
+            approved: approvedClubs,
+            pending: pendingClubs,
+            rejected: rejectedClubs,
+          },
+          membershipsPerClub,
+        });
+      } catch (error) {
+        console.error('Admin Stats Error:', error);
+        res.status(500).send({
+          message: 'Failed to fetch admin statistics',
+          error: error.message,
+        });
+      }
+    });
     console.log('✅ Routes loaded');
   } catch (err) {
     console.error('❌ MongoDB Error:', err);
