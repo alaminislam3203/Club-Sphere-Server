@@ -69,6 +69,20 @@ async function run() {
       }
     });
 
+    app.get('/users/:email', async (req, res) => {
+      try {
+        const email = req.params.email;
+        const user = await usersCollection.findOne({ email });
+        if (!user) {
+          return res.status(404).send({ message: 'User not found' });
+        }
+        res.send(user);
+      } catch (error) {
+        console.error('Error fetching user profile:', error);
+        res.status(500).send({ message: 'Internal Server Error' });
+      }
+    });
+
     console.log('✅ Routes loaded');
   } catch (err) {
     console.error('❌ MongoDB Error:', err);
@@ -83,5 +97,5 @@ run().catch(console.dir);
 app.get('/', (req, res) => res.send('🚀 Server is running'));
 
 app.listen(port, () => {
-  console.log(`🚀 Server running on port ${port}`);
+  console.log(` Server running on port ${port}`);
 });
