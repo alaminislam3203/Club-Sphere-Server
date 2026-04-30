@@ -1090,6 +1090,44 @@ async function run() {
         });
       }
     });
+
+    app.get('/club-manager-overview', verifyFBToken, async (req, res) => {
+      try {
+        const managerEmail = req.query.managerEmail;
+        if (!managerEmail)
+          return res.status(400).send({ message: 'managerEmail is required' });
+        const totalClubs = await clubsCollection.countDocuments({
+          managerEmail,
+        });
+        const myClubs = await clubsCollection.find({ managerEmail }).toArray();
+        const clubIds = myClubs.map(club => club._id.toString());
+        const totalEvents = await eventsCollection.countDocuments({
+          managerEmail,
+        });
+        const totalMembers = await clubMembershipCollection.countDocuments({
+          clubId: { $in: clubIds },
+          status: 'active',
+        });
+        const revenueResult = await paymentCollection
+          .aggregate([
+            { $match: { clubId: { $in: clubIds } } },
+            {
+              $group: {
+                _id: null,
+                totalRevenue: { $sum: { $toDouble: '$amount' } },
+              },
+            },
+          ])
+          .toArray();
+        const totalRevenue =
+          revenueResult.length > 0 ? revenueResult[0].totalRevenue : 0;
+        res.send({ totalClubs, totalEvents, totalMembers, totalRevenue });
+      } catch (error) {
+        console.error('Error fetching manager overview:', error);
+        res.status(500).send({ message: 'Internal Server Error', error });
+      }
+    });
+
     console.log('✅ Routes loaded');
   } catch (err) {
     console.error('❌ MongoDB Error:', err);
