@@ -390,6 +390,155 @@ async function run() {
         }
       },
     );
+
+    // ===============================================
+    // 👥 CLUB MEMBERSHIP ROUTES
+    // ===============================================
+    app.post(
+      '/payment-club-membership-free',
+      verifyFBToken,
+      async (req, res) => {
+        try {
+          const membershipRequest = req.body;
+          const existingMember = await clubMembershipCollection.findOne({
+            userEmail: membershipRequest.userEmail,
+            clubId: membershipRequest.clubId,
+          });
+          if (existingMember) {
+            return res.status(400).send({
+              success: false,
+              message:
+                'You have already sent a request or are already a member.',
+            });
+          }
+          const club = await clubsCollection.findOne({
+            _id: new ObjectId(membershipRequest.clubId),
+          });
+          const currentCount = club?.membersCount || 0;
+          const membershipData = {
+            userEmail: membershipRequest.userEmail,
+            clubId: membershipRequest.clubId,
+            clubName: membershipRequest.clubName,
+            managerEmail: membershipRequest.managerEmail,
+            transactionId: `FREE-${Date.now()}`,
+            status: 'active',
+            joinedAt: new Date(),
+            membersCount: currentCount + 1,
+          };
+          const result =
+            await clubMembershipCollection.insertOne(membershipData);
+          await clubsCollection.updateOne(
+            { _id: new ObjectId(membershipRequest.clubId) },
+            { $inc: { membersCount: 1 } },
+          );
+          const paymentData = {
+            userEmail: membershipRequest.userEmail,
+            amount: 0,
+            clubId: membershipRequest.clubId,
+            clubName: membershipRequest.clubName,
+            transactionId: membershipData.transactionId,
+            paymentType: 'club-membership',
+            status: 'paid',
+            paidAt: new Date(),
+          };
+          await paymentCollection.insertOne(paymentData);
+          res.send({ success: true, insertedId: result.insertedId });
+        } catch (error) {
+          res.status(500).send({ success: false, message: error.message });
+        }
+      },
+    );
+
+    app.post('/club-join-request', verifyFBToken, async (req, res) => {
+      try {
+        const joinData = req.body;
+        const { userEmail, clubId } = joinData;
+        const existingRequest = await clubMembershipCollection.findOne({
+          userEmail,
+          clubId,
+        });
+        if (existingRequest) {
+          return res.send({ message: 'already-exists', insertedId: null });
+        }
+        const finalJoinData = {
+          ...joinData,
+          status: 'pending',
+          joinedAt: new Date(),
+        };
+        const result = await clubMembershipCollection.insertOne(finalJoinData);
+        if (result.insertedId) {
+          await clubsCollection.updateOne(
+            { _id: new ObjectId(clubId) },
+            { $inc: { membersCount: 1 } },
+          );
+        }
+        res.send(result);
+      } catch (error) {
+        console.error('Error joining club:', error);
+        res.status(500).send({ message: 'Internal Server Error' });
+      }
+    });
+
+    app.patch(
+      '/club-memberships/:id/status',
+      verifyFBToken,
+      async (req, res) => {
+        try {
+          const id = req.params.id;
+          const { status } = req.body;
+          const result = await clubMembershipCollection.updateOne(
+            { _id: new ObjectId(id) },
+            { $set: { status } },
+          );
+          res.send(result);
+        } catch (error) {
+          res.status(500).send({ message: 'Internal Server Error' });
+        }
+      },
+    );
+
+    app.get('/manager/club-members', verifyFBToken, async (req, res) => {
+      try {
+        const { managerEmail, clubId } = req.query;
+        let query = { managerEmail };
+        if (clubId && clubId !== 'all') {
+          query.clubId = clubId;
+        }
+        const result = await clubMembershipCollection.find(query).toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'Internal Server Error' });
+      }
+    });
+
+    app.patch('/membership/status/:id', verifyFBToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+        const { status } = req.body;
+        const result = await clubMembershipCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { status } },
+        );
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'Internal Server Error' });
+      }
+    });
+
+    app.get('/member/my-clubs', verifyFBToken, async (req, res) => {
+      try {
+        const email = req.query.email;
+        if (req.decoded_email !== email)
+          return res.status(403).send({ message: 'Forbidden' });
+        const result = await clubMembershipCollection
+          .find({ userEmail: email })
+          .toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'Internal Server Error' });
+      }
+    });
+
     console.log('✅ Routes loaded');
   } catch (err) {
     console.error('❌ MongoDB Error:', err);
