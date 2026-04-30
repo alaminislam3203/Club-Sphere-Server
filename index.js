@@ -643,6 +643,103 @@ async function run() {
         }
       },
     );
+    // ✅ CLUB MEMBERSHIP payment session — type=club-membership hardcoded
+    app.post(
+      '/payment-club-membership',
+      checkStripe,
+      verifyFBToken,
+      async (req, res) => {
+        try {
+          const paymentInfo = req.body;
+          const amount = parseInt(paymentInfo.cost) * 100;
+          if (amount < 50)
+            return res
+              .status(400)
+              .send({ message: 'Amount too low. Minimum amount is 0.50 USD.' });
+          const session = await stripe.checkout.sessions.create({
+            line_items: [
+              {
+                price_data: {
+                  currency: 'usd',
+                  unit_amount: amount,
+                  product_data: {
+                    name: `${paymentInfo.clubName} - Club Membership`,
+                  },
+                },
+                quantity: 1,
+              },
+            ],
+            customer_email: paymentInfo.userEmail,
+            mode: 'payment',
+            metadata: {
+              userEmail: paymentInfo.userEmail,
+              clubId: paymentInfo.clubId,
+              cost: paymentInfo.cost,
+              paymentType: 'club-membership',
+              clubName: paymentInfo.clubName,
+              managerEmail: paymentInfo.managerEmail,
+            },
+            // ✅ type=club-membership hardcoded
+            success_url: `${process.env.SITE_DOMAIN}/payment-success?session_id={CHECKOUT_SESSION_ID}&type=club-membership`,
+            cancel_url: `${process.env.SITE_DOMAIN}/payment-cancelled`,
+          });
+          res.send({ url: session.url });
+        } catch (error) {
+          res.status(500).send({ error: error.message });
+        }
+      },
+    );
+
+    // ✅ PLAN MEMBERSHIP payment session — type=plan-membership hardcoded
+    app.post('/payment-checkout', checkStripe, async (req, res) => {
+      try {
+        const {
+          userEmail,
+          cost,
+          clubName,
+          eventTitle,
+          clubId,
+          eventId,
+          bannerImage,
+        } = req.body;
+        if (!cost || cost <= 0)
+          return res.status(400).send({ message: 'Invalid payment amount' });
+        const session = await stripe.checkout.sessions.create({
+          payment_method_types: ['card'],
+          line_items: [
+            {
+              price_data: {
+                currency: 'usd',
+                product_data: {
+                  name: clubName || eventTitle || 'ClubSphere Payment',
+                  ...(bannerImage && { images: [bannerImage] }),
+                },
+                unit_amount: Math.round(cost * 100),
+              },
+              quantity: 1,
+            },
+          ],
+          mode: 'payment',
+          metadata: {
+            userEmail,
+            clubName: clubName || '',
+            eventTitle: eventTitle || '',
+            clubId: clubId || '',
+            eventId: eventId || '',
+            paymentType: 'plan-membership',
+          },
+
+          success_url: `${process.env.SITE_DOMAIN}/payment-success?session_id={CHECKOUT_SESSION_ID}&type=plan-membership`,
+          cancel_url: `${process.env.SITE_DOMAIN}/payment-cancelled`,
+        });
+        res.send({ url: session.url });
+      } catch (error) {
+        res.status(500).send({
+          message: 'Payment session creation failed',
+          error: error.message,
+        });
+      }
+    });
 
     console.log('✅ Routes loaded');
   } catch (err) {
