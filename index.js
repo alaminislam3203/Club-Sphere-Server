@@ -105,11 +105,59 @@ async function run() {
           .json({ success: false, message: 'Internal server error' });
       }
     });
+    app.get('/users', verifyFBToken, async (req, res) => {
+      try {
+        const result = await usersCollection.find().toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'Internal Server Error' });
+      }
+    });
 
+    app.patch('/users/:id/role', verifyFBToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+        const { role } = req.body;
+        if (!role) return res.status(400).send({ message: 'Role is required' });
+        const result = await usersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { role } },
+        );
+        res.send({ modifiedCount: result.modifiedCount });
+      } catch (error) {
+        res.status(500).send({ message: 'Internal Server Error' });
+      }
+    });
     // ===============================================
-    // 🏢 CLUB MANAGEMENT ROUTES
+    // 🏛️ CLUB MANAGEMENT ROUTES
+    // NOTE: /clubs/event/:id MUST be before /clubs/:id
     // ===============================================
 
+    app.post('/clubs', verifyFBToken, async (req, res) => {
+      try {
+        const clubData = req.body;
+        const existingClub = await clubsCollection.findOne({
+          clubName: clubData.clubName,
+        });
+        if (existingClub) {
+          return res.status(400).send({
+            success: false,
+            message: 'A club with this name already exists!',
+          });
+        }
+        const result = await clubsCollection.insertOne(clubData);
+        res.status(201).send({
+          success: true,
+          insertedId: result.insertedId,
+          message: 'Club registered successfully and pending approval.',
+        });
+      } catch (error) {
+        console.error('Create Club Error:', error);
+        res
+          .status(500)
+          .send({ success: false, message: 'Internal Server Error' });
+      }
+    });
     console.log('✅ Routes loaded');
   } catch (err) {
     console.error('❌ MongoDB Error:', err);
