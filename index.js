@@ -158,6 +158,96 @@ async function run() {
           .send({ success: false, message: 'Internal Server Error' });
       }
     });
+    app.get('/clubs', async (req, res) => {
+      try {
+        const query = {};
+        const { category, location, managerEmail } = req.query;
+        if (category) query.category = category;
+        if (location) query.location = location;
+        if (managerEmail) query.managerEmail = managerEmail;
+        const result = await clubsCollection
+          .find(query)
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.status(200).send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'Failed to fetch clubs' });
+      }
+    });
+
+    app.get('/clubs/event/:id', verifyFBToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ message: 'Invalid Event ID' });
+        }
+        const result = await eventsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+        if (!result) {
+          return res.status(404).send({ message: 'Event not found' });
+        }
+        res.send(result);
+      } catch (error) {
+        res
+          .status(500)
+          .send({ message: 'Error fetching event details', error });
+      }
+    });
+
+    app.get('/clubs/:id', async (req, res) => {
+      try {
+        const clubId = req.params.id;
+        if (!ObjectId.isValid(clubId)) {
+          return res
+            .status(400)
+            .json({ success: false, message: 'Invalid Club ID' });
+        }
+        const club = await clubsCollection.findOne({
+          _id: new ObjectId(clubId),
+        });
+        if (!club)
+          return res
+            .status(404)
+            .json({ success: false, message: 'Club not found' });
+        res.status(200).json(club);
+      } catch (error) {
+        res.status(500).json({ success: false, message: 'Server error' });
+      }
+    });
+
+    app.patch('/clubs/:id', verifyFBToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+        const updatedData = req.body;
+        const result = await clubsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updatedData },
+        );
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'Internal Server Error' });
+      }
+    });
+
+    app.delete('/clubs/:id', verifyFBToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+        const result = await clubsCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+        if (result.deletedCount === 1) {
+          res.send({ success: true, message: 'Club deleted successfully' });
+        } else {
+          res.status(404).send({ success: false, message: 'Club not found' });
+        }
+      } catch (error) {
+        res
+          .status(500)
+          .send({ success: false, message: 'Internal Server Error' });
+      }
+    });
+
     console.log('✅ Routes loaded');
   } catch (err) {
     console.error('❌ MongoDB Error:', err);
