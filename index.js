@@ -539,6 +539,111 @@ async function run() {
       }
     });
 
+    // ===============================================
+    // 💳 PAYMENT ROUTES
+    // ===============================================
+
+    app.post(
+      '/create-checkout-session',
+      checkStripe,
+      verifyFBToken,
+      async (req, res) => {
+        try {
+          const { price, planName, userEmail } = req.body;
+          if (parseFloat(price) <= 0) {
+            return res
+              .status(400)
+              .send({ error: "Free plans don't require a payment intent." });
+          }
+          const amount = Math.round(parseFloat(price) * 100);
+          const paymentIntent = await stripe.paymentIntents.create({
+            amount,
+            currency: 'usd',
+            metadata: { userEmail, planName, price },
+            payment_method_types: ['card'],
+          });
+          res.send({ clientSecret: paymentIntent.client_secret });
+        } catch (error) {
+          console.error('Stripe Error:', error.message);
+          res.status(500).send({ error: error.message });
+        }
+      },
+    );
+
+    app.post('/save-membership', verifyFBToken, async (req, res) => {
+      try {
+        const membershipData = req.body;
+        const query = {
+          userEmail: membershipData.userEmail,
+          planName: membershipData.planName,
+        };
+        const existing = await PlanMembershipCollection.findOne(query);
+        if (existing) {
+          return res
+            .status(400)
+            .send({ message: 'Plan already active for this user.' });
+        }
+        const result = await PlanMembershipCollection.insertOne({
+          ...membershipData,
+          createdAt: new Date(),
+        });
+        res.send(result);
+      } catch (error) {
+        res
+          .status(500)
+          .send({ message: 'Failed to save membership', error: error.message });
+      }
+    });
+
+    // ✅ EVENT payment session — type=event hardcoded
+    app.post(
+      '/payment-checkout-session',
+      checkStripe,
+      verifyFBToken,
+      async (req, res) => {
+        try {
+          const paymentInfo = req.body;
+          const amount = parseInt(paymentInfo.amount) * 100;
+          if (amount < 50)
+            return res
+              .status(400)
+              .send({ message: 'Amount too low. Minimum amount is 0.50 USD.' });
+          const session = await stripe.checkout.sessions.create({
+            line_items: [
+              {
+                price_data: {
+                  currency: 'usd',
+                  unit_amount: amount,
+                  product_data: {
+                    name: paymentInfo.eventTitle || 'Event Payment',
+                  },
+                },
+                quantity: 1,
+              },
+            ],
+            customer_email: paymentInfo.userEmail,
+            mode: 'payment',
+            metadata: {
+              userEmail: paymentInfo.userEmail,
+              amount: paymentInfo.amount,
+              paymentType: 'event',
+              clubId: paymentInfo.clubId || '',
+              eventId: paymentInfo.eventId || '',
+              eventTitle: paymentInfo.eventTitle || '', // ✅ eventTitle metadata এ রাখা হচ্ছে
+            },
+            success_url: `${process.env.SITE_DOMAIN}/payment-success?session_id={CHECKOUT_SESSION_ID}&type=event`,
+            cancel_url: `${process.env.SITE_DOMAIN}/payment-cancelled`,
+          });
+          res.send({ url: session.url });
+        } catch (error) {
+          res.status(500).send({
+            message: 'Failed to create payment session',
+            error: error.message,
+          });
+        }
+      },
+    );
+
     console.log('✅ Routes loaded');
   } catch (err) {
     console.error('❌ MongoDB Error:', err);
