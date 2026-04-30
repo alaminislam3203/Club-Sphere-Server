@@ -943,7 +943,74 @@ async function run() {
         res.status(500).send({ success: false, message: error.message });
       }
     });
+    app.get('/payments', async (req, res) => {
+      try {
+        const payments = await paymentCollection
+          .find({})
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.send(payments);
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: 'Failed to fetch payments',
+          error: error.message,
+        });
+      }
+    });
 
+    // ===============================================
+    // 📊 STATISTICS ROUTES
+    // ===============================================
+    app.get('/member-stats/:email', verifyFBToken, async (req, res) => {
+      try {
+        const email = req.params.email;
+
+        // ✅ Clubs count (same)
+        const totalClubs = await clubMembershipCollection.countDocuments({
+          userEmail: email,
+          status: 'active',
+        });
+
+        // ✅ FIX: Only valid event registrations count হবে
+        const validEventQuery = {
+          userEmail: email,
+          eventId: { $exists: true, $ne: '' },
+          eventTitle: { $exists: true, $ne: '' },
+          clubId: { $exists: true, $ne: '' },
+        };
+
+        const totalEvents =
+          await eventRegistrationsCollection.countDocuments(validEventQuery);
+
+        const registeredEvents = await eventRegistrationsCollection
+          .find(validEventQuery)
+          .toArray();
+
+        const eventIds = registeredEvents
+          .map(reg => reg.eventId)
+          .filter(id => ObjectId.isValid(id))
+          .map(id => new ObjectId(id));
+
+        const nowISO = new Date().toISOString();
+
+        const upcomingEvents = await eventsCollection
+          .find({
+            _id: { $in: eventIds },
+            eventDate: { $gte: nowISO },
+          })
+          .sort({ eventDate: 1 })
+          .limit(3)
+          .toArray();
+
+        res.send({ totalClubs, totalEvents, upcomingEvents });
+      } catch (error) {
+        res.status(500).send({
+          message: 'Error fetching member stats',
+          error: error.message,
+        });
+      }
+    });
     console.log('✅ Routes loaded');
   } catch (err) {
     console.error('❌ MongoDB Error:', err);
