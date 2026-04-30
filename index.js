@@ -262,7 +262,60 @@ async function run() {
         res.status(500).send({ message: 'Internal Server Error' });
       }
     });
+    app.get('/events/upcoming', async (req, res) => {
+      try {
+        const query = {};
+        const { clubId, isPaid, location } = req.query;
+        if (clubId) query.clubId = clubId;
+        if (isPaid !== undefined) query.isPaid = isPaid === 'true';
+        if (location) query.location = location;
+        const nowISO = new Date().toISOString();
+        query.eventDate = { $gte: nowISO };
+        const events = await eventsCollection
+          .find(query)
+          .sort({ eventDate: 1 })
+          .toArray();
+        res.send(events);
+      } catch (err) {
+        res.status(500).send({ message: 'Failed to fetch upcoming events' });
+      }
+    });
 
+    app.get('/events', async (req, res) => {
+      try {
+        const managerEmail = req.query.managerEmail;
+        const query = managerEmail ? { managerEmail } : {};
+        const result = await eventsCollection.find(query).toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'Internal Server Error' });
+      }
+    });
+
+    app.patch('/events/:id', async (req, res) => {
+      try {
+        const id = req.params.id;
+        const updatedEvent = req.body;
+        const result = await eventsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updatedEvent },
+        );
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'Internal Server Error' });
+      }
+    });
+
+    app.delete('/events/:id', async (req, res) => {
+      try {
+        const result = await eventsCollection.deleteOne({
+          _id: new ObjectId(req.params.id),
+        });
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'Internal Server Error' });
+      }
+    });
     console.log('✅ Routes loaded');
   } catch (err) {
     console.error('❌ MongoDB Error:', err);
