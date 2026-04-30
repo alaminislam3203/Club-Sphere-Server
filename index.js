@@ -248,6 +248,21 @@ async function run() {
       }
     });
 
+    // ===============================================
+    // 📅 EVENT MANAGEMENT ROUTES
+    // ===============================================
+
+    app.post('/events', async (req, res) => {
+      try {
+        const eventData = req.body;
+        const result = await eventsCollection.insertOne(eventData);
+        res.status(201).send(result);
+      } catch (error) {
+        console.error('Error creating event:', error);
+        res.status(500).send({ message: 'Internal Server Error' });
+      }
+    });
+
     console.log('✅ Routes loaded');
   } catch (err) {
     console.error('❌ MongoDB Error:', err);
