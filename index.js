@@ -83,6 +83,33 @@ async function run() {
       }
     });
 
+    app.get('/users/:email/role', verifyFBToken, async (req, res) => {
+      try {
+        const email = req.params.email;
+        if (req.decoded_email !== email) {
+          return res.status(403).json({
+            success: false,
+            message: 'Access denied: Email mismatch',
+          });
+        }
+        const user = await usersCollection.findOne({ email });
+        if (!user) {
+          return res
+            .status(404)
+            .json({ success: false, message: 'User not found' });
+        }
+        res.send({ role: user.role || 'member' });
+      } catch (error) {
+        res
+          .status(500)
+          .json({ success: false, message: 'Internal server error' });
+      }
+    });
+
+    // ===============================================
+    // 🏢 CLUB MANAGEMENT ROUTES
+    // ===============================================
+
     console.log('✅ Routes loaded');
   } catch (err) {
     console.error('❌ MongoDB Error:', err);
