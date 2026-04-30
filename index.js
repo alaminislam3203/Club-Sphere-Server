@@ -1002,13 +1002,38 @@ async function run() {
           .sort({ eventDate: 1 })
           .limit(3)
           .toArray();
-
         res.send({ totalClubs, totalEvents, upcomingEvents });
       } catch (error) {
         res.status(500).send({
           message: 'Error fetching member stats',
           error: error.message,
         });
+      }
+    });
+    app.get('/member-payments/:email', verifyFBToken, async (req, res) => {
+      try {
+        const email = req.params.email;
+        if (req.decoded_email !== email) {
+          return res
+            .status(403)
+            .send({ message: 'Forbidden Access: Email Mismatch' });
+        }
+        const user = await usersCollection.findOne({ email });
+        if (!user || user.role !== 'member') {
+          return res.status(403).send({
+            message: 'Access Denied: Only members can view this history',
+          });
+        }
+        const result = await paymentCollection
+          .find({ userEmail: email })
+          .sort({ createdAt: -1, paidAt: -1 })
+          .toArray();
+        res.send(result);
+      } catch (error) {
+        console.error('Payment history fetch error:', error);
+        res
+          .status(500)
+          .send({ message: 'Error fetching payment history', error });
       }
     });
     console.log('✅ Routes loaded');
