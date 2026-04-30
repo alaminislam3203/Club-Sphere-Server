@@ -1,21 +1,130 @@
 const express = require('express');
 const cors = require('cors');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+const admin = require('firebase-admin');
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-// ========================
-// MIDDLEWARE
-// ========================
+// ===============================================
+// 🔥 STRIPE INIT
+// ===============================================
+
+let stripe;
+if (process.env.STRIPE_SECRET) {
+  try {
+    stripe = require('stripe')(process.env.STRIPE_SECRET);
+    console.log('✅ Stripe SDK Initialized.');
+  } catch (e) {
+    console.error('❌ CRITICAL: Failed to initialize Stripe SDK.', e.message);
+  }
+} else {
+  console.error('❌ CRITICAL: STRIPE_SECRET environment variable is missing.');
+}
+
+// ===============================================
+// 🔥 FIREBASE INIT
+// ===============================================
+
+let serviceAccount;
+
+if (process.env.FB_SERVICE_KEY && !process.env.FB_SERVICE_KEY.startsWith('{')) {
+  try {
+    const decoded = Buffer.from(process.env.FB_SERVICE_KEY, 'base64').toString(
+      'utf8',
+    );
+    serviceAccount = JSON.parse(decoded);
+    console.log('✅ Firebase Key Loaded: From Base64 (FB_SERVICE_KEY)');
+  } catch (e) {
+    console.error(
+      '⚠️ Firebase Base64 Decoding failed. Attempting Direct JSON Load.',
+    );
+    try {
+      serviceAccount = JSON.parse(process.env.FB_SERVICE_KEY);
+    } catch (e2) {
+      try {
+        const filePath = path.join(
+          __dirname,
+          'assignment-b12a11-firebase-adminsdk.json',
+        );
+        const fileContent = fs.readFileSync(filePath, 'utf8');
+        serviceAccount = JSON.parse(fileContent);
+        console.log('✅ Firebase Key Loaded: From local JSON file (DEV ONLY).');
+      } catch (e3) {
+        console.error('❌ CRITICAL: Failed to load Firebase credentials.');
+      }
+    }
+  }
+} else if (
+  process.env.FB_SERVICE_KEY &&
+  process.env.FB_SERVICE_KEY.startsWith('{')
+) {
+  try {
+    serviceAccount = JSON.parse(process.env.FB_SERVICE_KEY);
+    console.log('✅ Firebase Key Loaded: From Raw JSON string.');
+  } catch (e) {
+    console.error('❌ Firebase Admin Key Error: Invalid JSON.');
+  }
+}
+
+if (serviceAccount) {
+  admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+  console.log('✅ Firebase Admin SDK Initialized.');
+} else {
+  console.error('❌ Firebase Admin SDK NOT INITIALIZED.');
+}
+
+// ===============================================
+// 🌐 MIDDLEWARE
+// ===============================================
+
 app.use(cors());
 app.use(express.json());
 
-// ========================
-// MONGO DB CONNECTION
-// ========================
-const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.mongodb.net/?retryWrites=true&w=majority`;
+// ===============================================
+// ✅ verifyFBToken Middleware
+// ===============================================
+
+const verifyFBToken = async (req, res, next) => {
+  if (!serviceAccount) {
+    return res.status(500).send({
+      message: 'Server configuration error: Firebase not initialized.',
+    });
+  }
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).send({ message: 'unauthorized access' });
+  }
+  try {
+    const idToken = authHeader.split(' ')[1];
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    req.decoded_email = decoded.email;
+    next();
+  } catch (err) {
+    console.error('Token verification failed:', err.message);
+    return res.status(401).send({ message: 'unauthorized access' });
+  }
+};
+
+// ===============================================
+// 🛡️ checkStripe Middleware
+// ===============================================
+
+const checkStripe = (req, res, next) => {
+  if (!stripe) {
+    return res.status(503).send({ message: 'Payment service is unavailable.' });
+  }
+  next();
+};
+
+// ===============================================
+// 📊 DATABASE CONNECTION
+// ===============================================
+
+const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@clubsphere.g026izu.mongodb.net/?appName=ClubSphere`;
 
 const client = new MongoClient(uri, {
   serverApi: {
@@ -28,13 +137,9 @@ const client = new MongoClient(uri, {
 async function run() {
   try {
     await client.connect();
-    console.log('✅ MongoDB Connected');
+    console.log('✅ MongoDB Connected Successfully!');
 
     const db = client.db('ClubSphereDB');
-
-    // ========================
-    // COLLECTIONS
-    // ========================
     const usersCollection = db.collection('users');
     const clubsCollection = db.collection('clubs');
     const eventsCollection = db.collection('events');
@@ -42,10 +147,6 @@ async function run() {
     const clubMembershipCollection = db.collection('clubMembership');
     const paymentCollection = db.collection('payments');
     const PlanMembershipCollection = db.collection('planMemberships');
-
-    // ========================
-    // BASIC ROUTES
-    // ========================
 
     // ===============================================
     // 👤 USER MANAGEMENT ROUTES
@@ -87,10 +188,9 @@ async function run() {
       try {
         const email = req.params.email;
         if (req.decoded_email !== email) {
-          return res.status(403).json({
-            success: false,
-            message: 'Access denied: Email mismatch',
-          });
+          return res
+            .status(403)
+            .json({ success: false, message: 'Access denied: Email mismatch' });
         }
         const user = await usersCollection.findOne({ email });
         if (!user) {
@@ -105,6 +205,7 @@ async function run() {
           .json({ success: false, message: 'Internal server error' });
       }
     });
+
     app.get('/users', verifyFBToken, async (req, res) => {
       try {
         const result = await usersCollection.find().toArray();
@@ -128,9 +229,9 @@ async function run() {
         res.status(500).send({ message: 'Internal Server Error' });
       }
     });
+
     // ===============================================
     // 🏛️ CLUB MANAGEMENT ROUTES
-    // NOTE: /clubs/event/:id MUST be before /clubs/:id
     // ===============================================
 
     app.post('/clubs', verifyFBToken, async (req, res) => {
@@ -158,6 +259,7 @@ async function run() {
           .send({ success: false, message: 'Internal Server Error' });
       }
     });
+
     app.get('/clubs', async (req, res) => {
       try {
         const query = {};
@@ -262,6 +364,7 @@ async function run() {
         res.status(500).send({ message: 'Internal Server Error' });
       }
     });
+
     app.get('/events/upcoming', async (req, res) => {
       try {
         const query = {};
@@ -319,7 +422,6 @@ async function run() {
 
     // ===============================================
     // 📋 EVENT REGISTRATION ROUTES
-    // ✅ FIX: eventTitle সহ সব field save হচ্ছে (free & paid)
     // ===============================================
 
     app.post('/event-registrations', verifyFBToken, async (req, res) => {
@@ -347,9 +449,9 @@ async function run() {
 
         const registrationData = {
           ...registration,
-          eventTitle, // ✅ eventTitle সহ save
+          eventTitle,
           registeredAt: registration.registeredAt || new Date().toISOString(),
-          paymentType: registration.paymentType || 'free', // ✅ free বা paid
+          paymentType: registration.paymentType || 'free',
         };
 
         const result =
@@ -394,6 +496,7 @@ async function run() {
     // ===============================================
     // 👥 CLUB MEMBERSHIP ROUTES
     // ===============================================
+
     app.post(
       '/payment-club-membership-free',
       verifyFBToken,
@@ -595,7 +698,6 @@ async function run() {
       }
     });
 
-    // ✅ EVENT payment session — type=event hardcoded
     app.post(
       '/payment-checkout-session',
       checkStripe,
@@ -629,8 +731,9 @@ async function run() {
               paymentType: 'event',
               clubId: paymentInfo.clubId || '',
               eventId: paymentInfo.eventId || '',
-              eventTitle: paymentInfo.eventTitle || '', // ✅ eventTitle metadata এ রাখা হচ্ছে
+              eventTitle: paymentInfo.eventTitle || '',
             },
+
             success_url: `${process.env.SITE_DOMAIN}/payment-success?session_id={CHECKOUT_SESSION_ID}&type=event`,
             cancel_url: `${process.env.SITE_DOMAIN}/payment-cancelled`,
           });
@@ -643,7 +746,8 @@ async function run() {
         }
       },
     );
-    // ✅ CLUB MEMBERSHIP payment session — type=club-membership hardcoded
+
+    // ✅ CLUB MEMBERSHIP payment session — type=club-membership
     app.post(
       '/payment-club-membership',
       checkStripe,
@@ -679,7 +783,7 @@ async function run() {
               clubName: paymentInfo.clubName,
               managerEmail: paymentInfo.managerEmail,
             },
-            // ✅ type=club-membership hardcoded
+            // ✅ type=club-membership
             success_url: `${process.env.SITE_DOMAIN}/payment-success?session_id={CHECKOUT_SESSION_ID}&type=club-membership`,
             cancel_url: `${process.env.SITE_DOMAIN}/payment-cancelled`,
           });
@@ -690,7 +794,7 @@ async function run() {
       },
     );
 
-    // ✅ PLAN MEMBERSHIP payment session — type=plan-membership hardcoded
+    // ✅ PLAN MEMBERSHIP payment session — type=plan-membership
     app.post('/payment-checkout', checkStripe, async (req, res) => {
       try {
         const {
@@ -741,8 +845,6 @@ async function run() {
       }
     });
 
-    // ✅ EVENT payment success handler
-    // FIX: eventRegistrations এ eventTitle সহ সব field save হচ্ছে
     app.patch('/payment-success', checkStripe, async (req, res) => {
       try {
         const sessionId = req.query.session_id;
@@ -757,7 +859,6 @@ async function run() {
           const paymentType = session.metadata.paymentType || 'event';
           const eventTitle = session.metadata.eventTitle || '';
 
-          // ✅ payments collection এ eventTitle সহ save
           const paymentInfo = {
             userEmail: session.metadata.userEmail,
             amount: session.metadata.amount,
@@ -776,14 +877,13 @@ async function run() {
             { upsert: true },
           );
 
-          // ✅ FIX: eventRegistrations এ eventTitle সহ সব field save হচ্ছে
           const registration = {
             eventId: session.metadata.eventId,
             userEmail: session.metadata.userEmail,
             clubId: session.metadata.clubId,
-            eventTitle, // ✅ eventTitle save
+            eventTitle,
             status: 'registered',
-            paymentType: 'paid', // ✅ paid event চেনা যাবে
+            paymentType: 'paid',
             paymentId: sessionId,
             registeredAt: new Date().toISOString(),
           };
@@ -815,7 +915,7 @@ async function run() {
       }
     });
 
-    // ✅ CLUB MEMBERSHIP payment success handler
+    //  CLUB MEMBERSHIP payment success handler
     app.patch(
       '/club-membership-payment-success',
       checkStripe,
@@ -943,6 +1043,7 @@ async function run() {
         res.status(500).send({ success: false, message: error.message });
       }
     });
+
     app.get('/payments', async (req, res) => {
       try {
         const payments = await paymentCollection
@@ -966,13 +1067,11 @@ async function run() {
       try {
         const email = req.params.email;
 
-        // ✅ Clubs count (same)
         const totalClubs = await clubMembershipCollection.countDocuments({
           userEmail: email,
           status: 'active',
         });
 
-        // ✅ FIX: Only valid event registrations count হবে
         const validEventQuery = {
           userEmail: email,
           eventId: { $exists: true, $ne: '' },
@@ -1002,6 +1101,7 @@ async function run() {
           .sort({ eventDate: 1 })
           .limit(3)
           .toArray();
+
         res.send({ totalClubs, totalEvents, upcomingEvents });
       } catch (error) {
         res.status(500).send({
@@ -1128,19 +1228,30 @@ async function run() {
       }
     });
 
-    console.log('✅ Routes loaded');
-  } catch (err) {
-    console.error('❌ MongoDB Error:', err);
+    console.log('✅ All routes registered successfully.');
+  } catch (error) {
+    console.error('❌ Failed to connect to MongoDB:', error);
+    process.exit(1);
   }
 }
 
 run().catch(console.dir);
 
-// ========================
-// SERVER START
-// ========================
-app.get('/', (req, res) => res.send('🚀 Server is running'));
+// ===============================================
+// 🚀 SERVER START
+// ===============================================
+
+app.get('/', (req, res) => {
+  res.send('🚀 ClubSphere Server is Running!');
+});
+
+app.use((err, req, res, next) => {
+  console.error('Unhandled Error:', err.message);
+  res
+    .status(500)
+    .send({ message: 'Something went wrong!', error: err.message });
+});
 
 app.listen(port, () => {
-  console.log(` Server running on port ${port}`);
+  console.log(`✅ ClubSphere Server listening on port ${port}`);
 });
