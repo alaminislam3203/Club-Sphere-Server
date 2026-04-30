@@ -741,6 +741,209 @@ async function run() {
       }
     });
 
+    // ✅ EVENT payment success handler
+    // FIX: eventRegistrations এ eventTitle সহ সব field save হচ্ছে
+    app.patch('/payment-success', checkStripe, async (req, res) => {
+      try {
+        const sessionId = req.query.session_id;
+        if (!sessionId)
+          return res
+            .status(400)
+            .send({ success: false, message: 'Session ID required' });
+
+        const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+        if (session.payment_status === 'paid') {
+          const paymentType = session.metadata.paymentType || 'event';
+          const eventTitle = session.metadata.eventTitle || '';
+
+          // ✅ payments collection এ eventTitle সহ save
+          const paymentInfo = {
+            userEmail: session.metadata.userEmail,
+            amount: session.metadata.amount,
+            paymentType,
+            clubId: session.metadata.clubId,
+            eventId: session.metadata.eventId,
+            eventTitle, // ✅ eventTitle save
+            transactionId: sessionId,
+            status: 'paid',
+            createdAt: new Date(),
+          };
+
+          await paymentCollection.updateOne(
+            { transactionId: sessionId },
+            { $setOnInsert: paymentInfo },
+            { upsert: true },
+          );
+
+          // ✅ FIX: eventRegistrations এ eventTitle সহ সব field save হচ্ছে
+          const registration = {
+            eventId: session.metadata.eventId,
+            userEmail: session.metadata.userEmail,
+            clubId: session.metadata.clubId,
+            eventTitle, // ✅ eventTitle save
+            status: 'registered',
+            paymentType: 'paid', // ✅ paid event চেনা যাবে
+            paymentId: sessionId,
+            registeredAt: new Date().toISOString(),
+          };
+
+          await eventRegistrationsCollection.updateOne(
+            {
+              eventId: session.metadata.eventId,
+              userEmail: session.metadata.userEmail,
+            },
+            { $setOnInsert: registration },
+            { upsert: true },
+          );
+
+          return res.send({
+            success: true,
+            paymentType,
+            message: 'Payment and registration processed successfully',
+          });
+        }
+        res
+          .status(400)
+          .send({ success: false, message: 'Payment not completed' });
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: 'Payment success API error',
+          error: error.message,
+        });
+      }
+    });
+
+    // ✅ CLUB MEMBERSHIP payment success handler
+    app.patch(
+      '/club-membership-payment-success',
+      checkStripe,
+      async (req, res) => {
+        try {
+          const sessionId = req.query.session_id;
+          if (!sessionId)
+            return res
+              .status(400)
+              .send({ success: false, message: 'Session ID is required' });
+
+          const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+          if (session.payment_status === 'paid') {
+            const paymentType =
+              session.metadata.paymentType || 'club-membership';
+
+            const paymentInfo = {
+              userEmail: session.metadata.userEmail,
+              amount: session.metadata.cost,
+              clubId: session.metadata.clubId,
+              clubName: session.metadata.clubName,
+              transactionId: sessionId,
+              paymentType,
+              status: 'paid',
+              paidAt: new Date(),
+            };
+
+            const paymentResult = await paymentCollection.updateOne(
+              { transactionId: sessionId },
+              { $setOnInsert: paymentInfo },
+              { upsert: true },
+            );
+
+            const clubMembership = {
+              userEmail: session.metadata.userEmail,
+              clubId: session.metadata.clubId,
+              clubName: session.metadata.clubName || 'N/A',
+              managerEmail: session.metadata.managerEmail,
+              paymentId: session.payment_intent,
+              status: 'active',
+              joinedAt: new Date(),
+            };
+
+            await clubMembershipCollection.updateOne(
+              {
+                userEmail: session.metadata.userEmail,
+                clubId: session.metadata.clubId,
+              },
+              { $set: clubMembership },
+              { upsert: true },
+            );
+
+            if (paymentResult.upsertedId) {
+              await clubsCollection.updateOne(
+                { _id: new ObjectId(session.metadata.clubId) },
+                { $inc: { membersCount: 1 } },
+              );
+            }
+
+            return res.send({
+              success: true,
+              paymentType,
+              message: 'Club membership payment saved successfully',
+            });
+          }
+
+          res
+            .status(400)
+            .send({ success: false, message: 'Payment not completed' });
+        } catch (error) {
+          res.status(500).send({
+            success: false,
+            message: 'Error in club membership payment success API',
+            error: error.message,
+          });
+        }
+      },
+    );
+
+    // ✅ PLAN MEMBERSHIP payment success handler
+    app.patch('/payment-success-record', checkStripe, async (req, res) => {
+      try {
+        const { session_id } = req.query;
+        if (!session_id)
+          return res
+            .status(400)
+            .send({ success: false, message: 'Session ID required' });
+
+        const session = await stripe.checkout.sessions.retrieve(session_id);
+
+        if (session.payment_status === 'paid') {
+          const { metadata, amount_total, payment_intent } = session;
+          const paymentType = metadata.paymentType || 'plan-membership';
+
+          const paymentRecord = {
+            transactionId: payment_intent,
+            userEmail: metadata.userEmail,
+            amount: amount_total / 100,
+            clubName: metadata.clubName,
+            eventTitle: metadata.eventTitle,
+            clubId: metadata.clubId,
+            eventId: metadata.eventId,
+            paymentType,
+            status: 'paid',
+            paidAt: new Date().toISOString(),
+          };
+
+          await paymentCollection.updateOne(
+            { transactionId: payment_intent },
+            { $setOnInsert: paymentRecord },
+            { upsert: true },
+          );
+
+          return res.send({
+            success: true,
+            paymentType,
+            message: 'Payment recorded successfully',
+          });
+        }
+        res
+          .status(400)
+          .send({ success: false, message: 'Payment not completed' });
+      } catch (error) {
+        res.status(500).send({ success: false, message: error.message });
+      }
+    });
+
     console.log('✅ Routes loaded');
   } catch (err) {
     console.error('❌ MongoDB Error:', err);
