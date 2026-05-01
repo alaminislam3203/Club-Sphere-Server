@@ -419,7 +419,6 @@ async function run() {
         res.status(500).send({ message: 'Internal Server Error' });
       }
     });
-
     // ===============================================
     // 📋 EVENT REGISTRATION ROUTES
     // ===============================================
@@ -466,9 +465,16 @@ async function run() {
       }
     });
 
+    // ✅ FIX: userEmail query থাকলে শুধু সেই user এর registration আসবে
+    // userEmail না থাকলে সব আসবে (admin এর জন্য)
     app.get('/event-registrations', verifyFBToken, async (req, res) => {
       try {
-        const result = await eventRegistrationsCollection.find().toArray();
+        const { userEmail } = req.query;
+        const query = userEmail ? { userEmail } : {};
+        const result = await eventRegistrationsCollection
+          .find(query)
+          .sort({ registeredAt: -1 })
+          .toArray();
         res.send(result);
       } catch (error) {
         res.status(500).send({ message: 'Server error' });
@@ -492,7 +498,6 @@ async function run() {
         }
       },
     );
-
     // ===============================================
     // 👥 CLUB MEMBERSHIP ROUTES
     // ===============================================
