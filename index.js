@@ -796,57 +796,7 @@ async function run() {
       },
     );
 
-    // // ✅ PLAN MEMBERSHIP payment session — type=plan-membership
-    // app.post('/payment-checkout', checkStripe, async (req, res) => {
-    //   try {
-    //     const {
-    //       userEmail,
-    //       cost,
-    //       clubName,
-    //       eventTitle,
-    //       clubId,
-    //       eventId,
-    //       bannerImage,
-    //     } = req.body;
-    //     if (!cost || cost <= 0)
-    //       return res.status(400).send({ message: 'Invalid payment amount' });
-    //     const session = await stripe.checkout.sessions.create({
-    //       payment_method_types: ['card'],
-    //       line_items: [
-    //         {
-    //           price_data: {
-    //             currency: 'usd',
-    //             product_data: {
-    //               name: clubName || eventTitle || 'ClubSphere Payment',
-    //               ...(bannerImage && { images: [bannerImage] }),
-    //             },
-    //             unit_amount: Math.round(cost * 100),
-    //           },
-    //           quantity: 1,
-    //         },
-    //       ],
-    //       mode: 'payment',
-    //       metadata: {
-    //         userEmail,
-    //         clubName: clubName || '',
-    //         eventTitle: eventTitle || '',
-    //         clubId: clubId || '',
-    //         eventId: eventId || '',
-    //         paymentType: 'plan-membership',
-    //       },
-
-    //       success_url: `${process.env.SITE_DOMAIN}/payment-success?session_id={CHECKOUT_SESSION_ID}&type=plan-membership`,
-    //       cancel_url: `${process.env.SITE_DOMAIN}/payment-cancelled`,
-    //     });
-    //     res.send({ url: session.url });
-    //   } catch (error) {
-    //     res.status(500).send({
-    //       message: 'Payment session creation failed',
-    //       error: error.message,
-    //     });
-    //   }
-    // });
-
+    // ✅ PLAN MEMBERSHIP payment session — type=plan-membership
     app.post('/payment-checkout', checkStripe, async (req, res) => {
       try {
         const {
@@ -857,12 +807,9 @@ async function run() {
           clubId,
           eventId,
           bannerImage,
-          planName, // ✅ NEW — frontend থেকে পাঠাতে হবে
         } = req.body;
-
         if (!cost || cost <= 0)
           return res.status(400).send({ message: 'Invalid payment amount' });
-
         const session = await stripe.checkout.sessions.create({
           payment_method_types: ['card'],
           line_items: [
@@ -870,8 +817,7 @@ async function run() {
               price_data: {
                 currency: 'usd',
                 product_data: {
-                  name:
-                    planName || clubName || eventTitle || 'ClubSphere Payment',
+                  name: clubName || eventTitle || 'ClubSphere Payment',
                   ...(bannerImage && { images: [bannerImage] }),
                 },
                 unit_amount: Math.round(cost * 100),
@@ -880,20 +826,18 @@ async function run() {
             },
           ],
           mode: 'payment',
-          customer_email: userEmail, // ✅ NEW — Stripe এ email set
           metadata: {
             userEmail,
             clubName: clubName || '',
             eventTitle: eventTitle || '',
             clubId: clubId || '',
             eventId: eventId || '',
-            planName: planName || '', // ✅ NEW
             paymentType: 'plan-membership',
           },
+
           success_url: `${process.env.SITE_DOMAIN}/payment-success?session_id={CHECKOUT_SESSION_ID}&type=plan-membership`,
           cancel_url: `${process.env.SITE_DOMAIN}/payment-cancelled`,
         });
-
         res.send({ url: session.url });
       } catch (error) {
         res.status(500).send({
@@ -1054,54 +998,6 @@ async function run() {
       },
     );
 
-    // // ✅ PLAN MEMBERSHIP payment success handler
-    // app.patch('/payment-success-record', checkStripe, async (req, res) => {
-    //   try {
-    //     const { session_id } = req.query;
-    //     if (!session_id)
-    //       return res
-    //         .status(400)
-    //         .send({ success: false, message: 'Session ID required' });
-
-    //     const session = await stripe.checkout.sessions.retrieve(session_id);
-
-    //     if (session.payment_status === 'paid') {
-    //       const { metadata, amount_total, payment_intent } = session;
-    //       const paymentType = metadata.paymentType || 'plan-membership';
-
-    //       const paymentRecord = {
-    //         transactionId: payment_intent,
-    //         userEmail: metadata.userEmail,
-    //         amount: amount_total / 100,
-    //         clubName: metadata.clubName,
-    //         eventTitle: metadata.eventTitle,
-    //         clubId: metadata.clubId,
-    //         eventId: metadata.eventId,
-    //         paymentType,
-    //         status: 'paid',
-    //         paidAt: new Date().toISOString(),
-    //       };
-
-    //       await paymentCollection.updateOne(
-    //         { transactionId: payment_intent },
-    //         { $setOnInsert: paymentRecord },
-    //         { upsert: true },
-    //       );
-
-    //       return res.send({
-    //         success: true,
-    //         paymentType,
-    //         message: 'Payment recorded successfully',
-    //       });
-    //     }
-    //     res
-    //       .status(400)
-    //       .send({ success: false, message: 'Payment not completed' });
-    //   } catch (error) {
-    //     res.status(500).send({ success: false, message: error.message });
-    //   }
-    // });
-
     // ✅ PLAN MEMBERSHIP payment success handler
     app.patch('/payment-success-record', checkStripe, async (req, res) => {
       try {
@@ -1114,20 +1010,17 @@ async function run() {
         const session = await stripe.checkout.sessions.retrieve(session_id);
 
         if (session.payment_status === 'paid') {
-          const { metadata, amount_total, payment_intent, customer_email } =
-            session;
+          const { metadata, amount_total, payment_intent } = session;
           const paymentType = metadata.paymentType || 'plan-membership';
 
-          // ✅ 1. Payment record save
           const paymentRecord = {
             transactionId: payment_intent,
-            userEmail: metadata.userEmail || customer_email,
+            userEmail: metadata.userEmail,
             amount: amount_total / 100,
-            clubName: metadata.clubName || '',
-            eventTitle: metadata.eventTitle || '',
-            clubId: metadata.clubId || '',
-            eventId: metadata.eventId || '',
-            planName: metadata.planName || '', // ✅ NEW
+            clubName: metadata.clubName,
+            eventTitle: metadata.eventTitle,
+            clubId: metadata.clubId,
+            eventId: metadata.eventId,
             paymentType,
             status: 'paid',
             paidAt: new Date().toISOString(),
@@ -1139,34 +1032,12 @@ async function run() {
             { upsert: true },
           );
 
-          // ✅ 2. PlanMembership auto-save (NEW)
-          if (metadata.planName) {
-            const planMembershipData = {
-              userEmail: metadata.userEmail || customer_email,
-              planName: metadata.planName,
-              transactionId: payment_intent,
-              amount: amount_total / 100,
-              status: 'active',
-              createdAt: new Date(),
-            };
-
-            await PlanMembershipCollection.updateOne(
-              {
-                userEmail: planMembershipData.userEmail,
-                planName: planMembershipData.planName,
-              },
-              { $setOnInsert: planMembershipData },
-              { upsert: true },
-            );
-          }
-
           return res.send({
             success: true,
             paymentType,
             message: 'Payment recorded successfully',
           });
         }
-
         res
           .status(400)
           .send({ success: false, message: 'Payment not completed' });
