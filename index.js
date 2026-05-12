@@ -418,6 +418,7 @@ async function run() {
         res.status(500).send({ message: 'Internal Server Error' });
       }
     });
+
     // ===============================================
     // 📋 EVENT REGISTRATION ROUTES
     // ===============================================
@@ -430,6 +431,7 @@ async function run() {
         if (!eventId || !userEmail)
           return res.status(400).send({ message: 'Missing required fields.' });
 
+        // ✅ Duplicate registration check
         const existing = await eventRegistrationsCollection.findOne({
           eventId,
           userEmail,
@@ -437,23 +439,44 @@ async function run() {
         if (existing)
           return res.status(409).send({ message: 'Already registered.' });
 
+        // ✅ eventTitle বের করা
         let eventTitle = registration.eventTitle || '';
-        if (!eventTitle && ObjectId.isValid(eventId)) {
+        let clubId = registration.clubId || '';
+        if (ObjectId.isValid(eventId)) {
           const eventDoc = await eventsCollection.findOne({
             _id: new ObjectId(eventId),
           });
-          eventTitle = eventDoc?.eventTitle || eventDoc?.title || '';
+          if (!eventTitle)
+            eventTitle = eventDoc?.eventTitle || eventDoc?.title || '';
+          if (!clubId) clubId = eventDoc?.clubId || '';
         }
 
         const registrationData = {
           ...registration,
+          clubId,
           eventTitle,
           registeredAt: registration.registeredAt || new Date().toISOString(),
-          paymentType: registration.paymentType || 'free',
+          paymentType: 'free',
         };
 
         const result =
           await eventRegistrationsCollection.insertOne(registrationData);
+
+        // ✅ Free event → paymentCollection এ record save করা
+        const transactionId = `FREE-EVENT-${userEmail}-${eventId}-${Date.now()}`;
+        const paymentRecord = {
+          userEmail,
+          amount: 0,
+          eventId,
+          eventTitle,
+          clubId,
+          transactionId,
+          paymentType: 'event',
+          status: 'free',
+          paidAt: new Date(),
+        };
+        await paymentCollection.insertOne(paymentRecord);
+
         res.send({
           success: true,
           message: 'Event registered successfully!',
@@ -495,6 +518,7 @@ async function run() {
         }
       },
     );
+
     // ===============================================
     // 👥 CLUB MEMBERSHIP ROUTES
     // ===============================================
@@ -648,6 +672,9 @@ async function run() {
     // 💳 PAYMENT ROUTES
     // ===============================================
 
+    // -----------------------------------------------
+    // Plan membership payment intent (Stripe)
+    // -----------------------------------------------
     app.post(
       '/create-checkout-session',
       checkStripe,
@@ -655,11 +682,26 @@ async function run() {
       async (req, res) => {
         try {
           const { price, planName, userEmail } = req.body;
+
           if (parseFloat(price) <= 0) {
             return res
               .status(400)
               .send({ error: "Free plans don't require a payment intent." });
           }
+
+          // ✅ Duplicate plan check — same user + same plan already paid
+          const existingPlan = await PlanMembershipCollection.findOne({
+            userEmail,
+            planName,
+            status: 'paid',
+          });
+          if (existingPlan) {
+            return res.status(409).send({
+              success: false,
+              message: 'You have already purchased this plan.',
+            });
+          }
+
           const amount = Math.round(parseFloat(price) * 100);
           const paymentIntent = await stripe.paymentIntents.create({
             amount,
@@ -675,31 +717,78 @@ async function run() {
       },
     );
 
+    // -----------------------------------------------
+    // Save plan membership after successful payment
+    // ✅ Saves to planMemberships + paymentCollection
+    // -----------------------------------------------
     app.post('/save-membership', verifyFBToken, async (req, res) => {
       try {
         const membershipData = req.body;
-        const query = {
-          userEmail: membershipData.userEmail,
-          planName: membershipData.planName,
-        };
-        const existing = await PlanMembershipCollection.findOne(query);
-        if (existing) {
-          return res
-            .status(400)
-            .send({ message: 'Plan already active for this user.' });
+        const { userEmail, planName, transactionId } = membershipData;
+
+        // ✅ Duplicate check by transactionId in paymentCollection
+        if (transactionId) {
+          const existingPayment = await paymentCollection.findOne({
+            transactionId,
+          });
+          if (existingPayment) {
+            return res.status(409).send({
+              success: false,
+              message: 'This payment has already been recorded.',
+            });
+          }
         }
-        const result = await PlanMembershipCollection.insertOne({
+
+        // ✅ Duplicate check: same user + same plan already active
+        const existingPlan = await PlanMembershipCollection.findOne({
+          userEmail,
+          planName,
+          status: 'paid',
+        });
+        if (existingPlan) {
+          return res.status(409).send({
+            success: false,
+            message: 'Plan already active for this user.',
+          });
+        }
+
+        // ✅ Save to planMemberships collection
+        const planResult = await PlanMembershipCollection.insertOne({
           ...membershipData,
+          status: 'paid',
           createdAt: new Date(),
         });
-        res.send(result);
+
+        // ✅ Save to paymentCollection for history tracking
+        const paymentRecord = {
+          userEmail,
+          planName,
+          amount: membershipData.price || membershipData.amount || 0,
+          transactionId: transactionId || `PLAN-${Date.now()}`,
+          paymentType: 'plan-membership',
+          status: 'paid',
+          paidAt: new Date(),
+        };
+        await paymentCollection.insertOne(paymentRecord);
+
+        res.send({
+          success: true,
+          insertedId: planResult.insertedId,
+          message: 'Plan membership saved successfully.',
+        });
       } catch (error) {
-        res
-          .status(500)
-          .send({ message: 'Failed to save membership', error: error.message });
+        res.status(500).send({
+          success: false,
+          message: 'Failed to save membership',
+          error: error.message,
+        });
       }
     });
 
+    // -----------------------------------------------
+    // Event payment session
+    // ✅ Duplicate check before creating session
+    // -----------------------------------------------
     app.post(
       '/payment-checkout-session',
       checkStripe,
@@ -707,11 +796,42 @@ async function run() {
       async (req, res) => {
         try {
           const paymentInfo = req.body;
+          const { userEmail, eventId } = paymentInfo;
+
+          // ✅ Duplicate check — same user already registered/paid for this event
+          if (eventId) {
+            const existingRegistration =
+              await eventRegistrationsCollection.findOne({
+                eventId,
+                userEmail,
+              });
+            if (existingRegistration) {
+              return res.status(409).send({
+                success: false,
+                message: 'You have already registered for this event.',
+              });
+            }
+
+            const existingPayment = await paymentCollection.findOne({
+              userEmail,
+              eventId,
+              paymentType: 'event',
+              status: 'paid',
+            });
+            if (existingPayment) {
+              return res.status(409).send({
+                success: false,
+                message: 'Payment already exists for this event.',
+              });
+            }
+          }
+
           const amount = parseInt(paymentInfo.amount) * 100;
           if (amount < 50)
             return res
               .status(400)
               .send({ message: 'Amount too low. Minimum amount is 0.50 USD.' });
+
           const session = await stripe.checkout.sessions.create({
             line_items: [
               {
@@ -725,17 +845,16 @@ async function run() {
                 quantity: 1,
               },
             ],
-            customer_email: paymentInfo.userEmail,
+            customer_email: userEmail,
             mode: 'payment',
             metadata: {
-              userEmail: paymentInfo.userEmail,
+              userEmail,
               amount: paymentInfo.amount,
               paymentType: 'event',
               clubId: paymentInfo.clubId || '',
-              eventId: paymentInfo.eventId || '',
+              eventId: eventId || '',
               eventTitle: paymentInfo.eventTitle || '',
             },
-
             success_url: `${process.env.SITE_DOMAIN}/payment-success?session_id={CHECKOUT_SESSION_ID}&type=event`,
             cancel_url: `${process.env.SITE_DOMAIN}/payment-cancelled`,
           });
@@ -749,7 +868,10 @@ async function run() {
       },
     );
 
-    // ✅ CLUB MEMBERSHIP payment session — type=club-membership
+    // -----------------------------------------------
+    // Club membership payment session
+    // ✅ Duplicate check before creating session
+    // -----------------------------------------------
     app.post(
       '/payment-club-membership',
       checkStripe,
@@ -757,11 +879,41 @@ async function run() {
       async (req, res) => {
         try {
           const paymentInfo = req.body;
+          const { userEmail, clubId } = paymentInfo;
+
+          // ✅ Duplicate check — already a member
+          const existingMember = await clubMembershipCollection.findOne({
+            userEmail,
+            clubId,
+            status: 'active',
+          });
+          if (existingMember) {
+            return res.status(409).send({
+              success: false,
+              message: 'You are already a member of this club.',
+            });
+          }
+
+          // ✅ Duplicate check — payment already exists
+          const existingPayment = await paymentCollection.findOne({
+            userEmail,
+            clubId,
+            paymentType: 'club-membership',
+            status: 'paid',
+          });
+          if (existingPayment) {
+            return res.status(409).send({
+              success: false,
+              message: 'Club membership payment already processed.',
+            });
+          }
+
           const amount = parseInt(paymentInfo.cost) * 100;
           if (amount < 50)
             return res
               .status(400)
               .send({ message: 'Amount too low. Minimum amount is 0.50 USD.' });
+
           const session = await stripe.checkout.sessions.create({
             line_items: [
               {
@@ -775,17 +927,16 @@ async function run() {
                 quantity: 1,
               },
             ],
-            customer_email: paymentInfo.userEmail,
+            customer_email: userEmail,
             mode: 'payment',
             metadata: {
-              userEmail: paymentInfo.userEmail,
-              clubId: paymentInfo.clubId,
+              userEmail,
+              clubId,
               cost: paymentInfo.cost,
               paymentType: 'club-membership',
               clubName: paymentInfo.clubName,
               managerEmail: paymentInfo.managerEmail,
             },
-            // ✅ type=club-membership
             success_url: `${process.env.SITE_DOMAIN}/payment-success?session_id={CHECKOUT_SESSION_ID}&type=club-membership`,
             cancel_url: `${process.env.SITE_DOMAIN}/payment-cancelled`,
           });
@@ -796,20 +947,54 @@ async function run() {
       },
     );
 
-    // ✅ PLAN MEMBERSHIP payment session — type=plan-membership
+    // -----------------------------------------------
+    // Plan membership Stripe checkout session
+    // ✅ Duplicate check before creating session
+    // -----------------------------------------------
     app.post('/payment-checkout', checkStripe, async (req, res) => {
       try {
         const {
           userEmail,
-          cost,
+          amount,
           clubName,
           eventTitle,
           clubId,
           eventId,
           bannerImage,
+          planName,
         } = req.body;
-        if (!cost || cost <= 0)
+
+        // ✅ Duplicate check — plan already purchased
+        if (planName) {
+          const existingPlan = await PlanMembershipCollection.findOne({
+            userEmail,
+            planName,
+            status: 'paid',
+          });
+          if (existingPlan) {
+            return res.status(409).send({
+              success: false,
+              message: 'You have already purchased this plan.',
+            });
+          }
+
+          const existingPayment = await paymentCollection.findOne({
+            userEmail,
+            planName,
+            paymentType: 'plan-membership',
+            status: 'paid',
+          });
+          if (existingPayment) {
+            return res.status(409).send({
+              success: false,
+              message: 'Payment already recorded for this plan.',
+            });
+          }
+        }
+
+        if (!amount || amount <= 0)
           return res.status(400).send({ message: 'Invalid payment amount' });
+
         const session = await stripe.checkout.sessions.create({
           payment_method_types: ['card'],
           line_items: [
@@ -817,10 +1002,11 @@ async function run() {
               price_data: {
                 currency: 'usd',
                 product_data: {
-                  name: clubName || eventTitle || 'ClubSphere Payment',
+                  name:
+                    clubName || eventTitle || planName || 'ClubSphere Payment',
                   ...(bannerImage && { images: [bannerImage] }),
                 },
-                unit_amount: Math.round(cost * 100),
+                unit_amount: Math.round(amount * 100),
               },
               quantity: 1,
             },
@@ -832,9 +1018,9 @@ async function run() {
             eventTitle: eventTitle || '',
             clubId: clubId || '',
             eventId: eventId || '',
+            planName: planName || '',
             paymentType: 'plan-membership',
           },
-
           success_url: `${process.env.SITE_DOMAIN}/payment-success?session_id={CHECKOUT_SESSION_ID}&type=plan-membership`,
           cancel_url: `${process.env.SITE_DOMAIN}/payment-cancelled`,
         });
@@ -847,6 +1033,10 @@ async function run() {
       }
     });
 
+    // -----------------------------------------------
+    // Event payment success handler
+    // ✅ transactionId-based duplicate guard
+    // -----------------------------------------------
     app.patch('/payment-success', checkStripe, async (req, res) => {
       try {
         const sessionId = req.query.session_id;
@@ -854,6 +1044,19 @@ async function run() {
           return res
             .status(400)
             .send({ success: false, message: 'Session ID required' });
+
+        // ✅ Already processed guard
+        const alreadyProcessed = await paymentCollection.findOne({
+          transactionId: sessionId,
+        });
+        if (alreadyProcessed) {
+          return res.send({
+            success: true,
+            alreadyProcessed: true,
+            paymentType: alreadyProcessed.paymentType,
+            message: 'Payment already recorded.',
+          });
+        }
 
         const session = await stripe.checkout.sessions.retrieve(sessionId);
 
@@ -867,7 +1070,7 @@ async function run() {
             paymentType,
             clubId: session.metadata.clubId,
             eventId: session.metadata.eventId,
-            eventTitle, // ✅ eventTitle save
+            eventTitle,
             transactionId: sessionId,
             status: 'paid',
             createdAt: new Date(),
@@ -879,25 +1082,25 @@ async function run() {
             { upsert: true },
           );
 
-          const registration = {
+          // ✅ Duplicate guard for event registration
+          const existingReg = await eventRegistrationsCollection.findOne({
             eventId: session.metadata.eventId,
             userEmail: session.metadata.userEmail,
-            clubId: session.metadata.clubId,
-            eventTitle,
-            status: 'registered',
-            paymentType: 'paid',
-            paymentId: sessionId,
-            registeredAt: new Date().toISOString(),
-          };
+          });
 
-          await eventRegistrationsCollection.updateOne(
-            {
+          if (!existingReg) {
+            const registration = {
               eventId: session.metadata.eventId,
               userEmail: session.metadata.userEmail,
-            },
-            { $setOnInsert: registration },
-            { upsert: true },
-          );
+              clubId: session.metadata.clubId,
+              eventTitle,
+              status: 'registered',
+              paymentType: 'paid',
+              paymentId: sessionId,
+              registeredAt: new Date().toISOString(),
+            };
+            await eventRegistrationsCollection.insertOne(registration);
+          }
 
           return res.send({
             success: true,
@@ -917,7 +1120,10 @@ async function run() {
       }
     });
 
-    //  CLUB MEMBERSHIP payment success handler
+    // -----------------------------------------------
+    // Club membership payment success handler
+    // ✅ transactionId-based duplicate guard
+    // -----------------------------------------------
     app.patch(
       '/club-membership-payment-success',
       checkStripe,
@@ -928,6 +1134,19 @@ async function run() {
             return res
               .status(400)
               .send({ success: false, message: 'Session ID is required' });
+
+          // ✅ Already processed guard
+          const alreadyProcessed = await paymentCollection.findOne({
+            transactionId: sessionId,
+          });
+          if (alreadyProcessed) {
+            return res.send({
+              success: true,
+              alreadyProcessed: true,
+              paymentType: alreadyProcessed.paymentType,
+              message: 'Club membership payment already recorded.',
+            });
+          }
 
           const session = await stripe.checkout.sessions.retrieve(sessionId);
 
@@ -998,7 +1217,11 @@ async function run() {
       },
     );
 
-    // ✅ PLAN MEMBERSHIP payment success handler
+    // -----------------------------------------------
+    // Plan membership payment success handler
+    // ✅ transactionId-based duplicate guard
+    // ✅ Saves to planMemberships collection
+    // -----------------------------------------------
     app.patch('/payment-success-record', checkStripe, async (req, res) => {
       try {
         const { session_id } = req.query;
@@ -1012,15 +1235,32 @@ async function run() {
         if (session.payment_status === 'paid') {
           const { metadata, amount_total, payment_intent } = session;
           const paymentType = metadata.paymentType || 'plan-membership';
+          const planName = metadata.planName || metadata.clubName || '';
+          const userEmail = metadata.userEmail;
 
+          // ✅ Already processed guard (payment_intent is unique per Stripe payment)
+          const alreadyProcessed = await paymentCollection.findOne({
+            transactionId: payment_intent,
+          });
+          if (alreadyProcessed) {
+            return res.send({
+              success: true,
+              alreadyProcessed: true,
+              paymentType,
+              message: 'Payment already recorded.',
+            });
+          }
+
+          // ✅ Save to paymentCollection
           const paymentRecord = {
             transactionId: payment_intent,
-            userEmail: metadata.userEmail,
+            userEmail,
             amount: amount_total / 100,
             clubName: metadata.clubName,
             eventTitle: metadata.eventTitle,
             clubId: metadata.clubId,
             eventId: metadata.eventId,
+            planName,
             paymentType,
             status: 'paid',
             paidAt: new Date().toISOString(),
@@ -1032,12 +1272,34 @@ async function run() {
             { upsert: true },
           );
 
+          // ✅ Save to planMemberships collection
+          const existingPlan = await PlanMembershipCollection.findOne({
+            userEmail,
+            planName,
+            status: 'paid',
+          });
+
+          if (!existingPlan) {
+            await PlanMembershipCollection.insertOne({
+              userEmail,
+              planName,
+              amount: amount_total / 100,
+              transactionId: payment_intent,
+              clubName: metadata.clubName || '',
+              clubId: metadata.clubId || '',
+              paymentType,
+              status: 'paid',
+              createdAt: new Date(),
+            });
+          }
+
           return res.send({
             success: true,
             paymentType,
             message: 'Payment recorded successfully',
           });
         }
+
         res
           .status(400)
           .send({ success: false, message: 'Payment not completed' });
@@ -1065,6 +1327,7 @@ async function run() {
     // ===============================================
     // 📊 STATISTICS ROUTES
     // ===============================================
+
     app.get('/member-stats/:email', verifyFBToken, async (req, res) => {
       try {
         const email = req.params.email;
@@ -1083,7 +1346,6 @@ async function run() {
 
         const totalEvents =
           await eventRegistrationsCollection.countDocuments(validEventQuery);
-
         const registeredEvents = await eventRegistrationsCollection
           .find(validEventQuery)
           .toArray();
@@ -1112,6 +1374,7 @@ async function run() {
         });
       }
     });
+
     app.get('/member-payments/:email', verifyFBToken, async (req, res) => {
       try {
         const email = req.params.email;
