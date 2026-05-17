@@ -439,7 +439,7 @@ async function run() {
         if (existing)
           return res.status(409).send({ message: 'Already registered.' });
 
-        // ✅ eventTitle বের করা
+        // ✅ eventTitle ও clubId বের করা + maxAttendees check
         let eventTitle = registration.eventTitle || '';
         let clubId = registration.clubId || '';
         if (ObjectId.isValid(eventId)) {
@@ -449,6 +449,26 @@ async function run() {
           if (!eventTitle)
             eventTitle = eventDoc?.eventTitle || eventDoc?.title || '';
           if (!clubId) clubId = eventDoc?.clubId || '';
+
+          // ✅ maxAttendees check — 0 বা null হলে unlimited
+          const maxAttendees = eventDoc?.maxAttendees;
+          if (maxAttendees && maxAttendees > 0 && maxAttendees <= 0) {
+            return res.status(400).send({
+              success: false,
+              message: 'This event is fully booked. No seats available.',
+            });
+          }
+          // ✅ আরও accurate check: maxAttendees এর বিপরীতে current registration count
+          if (maxAttendees && maxAttendees > 0) {
+            const currentCount =
+              await eventRegistrationsCollection.countDocuments({ eventId });
+            if (currentCount >= maxAttendees) {
+              return res.status(400).send({
+                success: false,
+                message: 'This event is fully booked. No seats available.',
+              });
+            }
+          }
         }
 
         const registrationData = {
@@ -461,6 +481,14 @@ async function run() {
 
         const result =
           await eventRegistrationsCollection.insertOne(registrationData);
+
+        // ✅ maxAttendees 1 কমানো (0 হলে update হবে না)
+        if (ObjectId.isValid(eventId)) {
+          await eventsCollection.updateOne(
+            { _id: new ObjectId(eventId), maxAttendees: { $gt: 0 } },
+            { $inc: { maxAttendees: -1 } },
+          );
+        }
 
         // ✅ Free event → paymentCollection এ record save করা
         const transactionId = `FREE-EVENT-${userEmail}-${eventId}-${Date.now()}`;
@@ -518,6 +546,27 @@ async function run() {
         }
       },
     );
+    app.patch(
+      '/event-registrations/:id/status',
+      verifyFBToken,
+      async (req, res) => {
+        try {
+          const id = req.params.id;
+          const { status } = req.body;
+          if (!status)
+            return res.status(400).send({ message: 'Status is required' });
+          if (!ObjectId.isValid(id))
+            return res.status(400).send({ message: 'Invalid registration ID' });
+          const result = await eventRegistrationsCollection.updateOne(
+            { _id: new ObjectId(id) },
+            { $set: { status } },
+          );
+          res.send(result);
+        } catch (error) {
+          res.status(500).send({ message: 'Internal Server Error' });
+        }
+      },
+    );
 
     // ===============================================
     // 👥 CLUB MEMBERSHIP ROUTES
@@ -529,48 +578,66 @@ async function run() {
       async (req, res) => {
         try {
           const membershipRequest = req.body;
+          const { userEmail, clubId, clubName, managerEmail } =
+            membershipRequest;
+
+          // ✅ Duplicate check
           const existingMember = await clubMembershipCollection.findOne({
-            userEmail: membershipRequest.userEmail,
-            clubId: membershipRequest.clubId,
+            userEmail,
+            clubId,
           });
           if (existingMember) {
-            return res.status(400).send({
+            return res.status(409).send({
               success: false,
               message:
                 'You have already sent a request or are already a member.',
             });
           }
-          const club = await clubsCollection.findOne({
-            _id: new ObjectId(membershipRequest.clubId),
+          const existingPayment = await paymentCollection.findOne({
+            userEmail,
+            clubId,
+            paymentType: 'club-membership',
           });
-          const currentCount = club?.membersCount || 0;
+          if (existingPayment) {
+            return res.status(409).send({
+              success: false,
+              message: 'Club membership payment already recorded.',
+            });
+          }
+
+          const transactionId = `FREE-${Date.now()}`;
+
+          // ✅ Membership save
           const membershipData = {
-            userEmail: membershipRequest.userEmail,
-            clubId: membershipRequest.clubId,
-            clubName: membershipRequest.clubName,
-            managerEmail: membershipRequest.managerEmail,
-            transactionId: `FREE-${Date.now()}`,
+            userEmail,
+            clubId,
+            clubName,
+            managerEmail,
+            transactionId,
             status: 'active',
             joinedAt: new Date(),
-            membersCount: currentCount + 1,
           };
           const result =
             await clubMembershipCollection.insertOne(membershipData);
+
+          // ✅ join করা মাত্রই clubs collection-এ membersCount +1 (number হিসেবে)
           await clubsCollection.updateOne(
-            { _id: new ObjectId(membershipRequest.clubId) },
+            { _id: new ObjectId(clubId) },
             { $inc: { membersCount: 1 } },
           );
-          const paymentData = {
-            userEmail: membershipRequest.userEmail,
+
+          // ✅ Payment record
+          await paymentCollection.insertOne({
+            userEmail,
+            clubId,
+            clubName,
             amount: 0,
-            clubId: membershipRequest.clubId,
-            clubName: membershipRequest.clubName,
-            transactionId: membershipData.transactionId,
+            transactionId,
             paymentType: 'club-membership',
             status: 'paid',
             paidAt: new Date(),
-          };
-          await paymentCollection.insertOne(paymentData);
+          });
+
           res.send({ success: true, insertedId: result.insertedId });
         } catch (error) {
           res.status(500).send({ success: false, message: error.message });
@@ -582,25 +649,32 @@ async function run() {
       try {
         const joinData = req.body;
         const { userEmail, clubId } = joinData;
+
+        // ✅ Duplicate check
         const existingRequest = await clubMembershipCollection.findOne({
           userEmail,
           clubId,
         });
         if (existingRequest) {
-          return res.send({ message: 'already-exists', insertedId: null });
+          return res
+            .status(409)
+            .send({ message: 'already-exists', insertedId: null });
         }
-        const finalJoinData = {
+
+        const result = await clubMembershipCollection.insertOne({
           ...joinData,
           status: 'pending',
           joinedAt: new Date(),
-        };
-        const result = await clubMembershipCollection.insertOne(finalJoinData);
+        });
+
+        // ✅ join request submit করা মাত্রই clubs collection-এ membersCount +1
         if (result.insertedId) {
           await clubsCollection.updateOne(
             { _id: new ObjectId(clubId) },
             { $inc: { membersCount: 1 } },
           );
         }
+
         res.send(result);
       } catch (error) {
         console.error('Error joining club:', error);
@@ -1100,6 +1174,17 @@ async function run() {
               registeredAt: new Date().toISOString(),
             };
             await eventRegistrationsCollection.insertOne(registration);
+
+            // ✅ maxAttendees 1 কমানো (paid event)
+            if (ObjectId.isValid(session.metadata.eventId)) {
+              await eventsCollection.updateOne(
+                {
+                  _id: new ObjectId(session.metadata.eventId),
+                  maxAttendees: { $gt: 0 },
+                },
+                { $inc: { maxAttendees: -1 } },
+              );
+            }
           }
 
           return res.send({
@@ -1191,6 +1276,7 @@ async function run() {
             );
 
             if (paymentResult.upsertedId) {
+              // ✅ paid join করা মাত্রই clubs collection-এ membersCount +1
               await clubsCollection.updateOne(
                 { _id: new ObjectId(session.metadata.clubId) },
                 { $inc: { membersCount: 1 } },
