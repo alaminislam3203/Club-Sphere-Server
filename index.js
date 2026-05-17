@@ -482,7 +482,7 @@ async function run() {
         const result =
           await eventRegistrationsCollection.insertOne(registrationData);
 
-        // ✅ maxAttendees 1 কমানো (0 হলে update হবে না)
+        // ✅ maxAttendees )
         if (ObjectId.isValid(eventId)) {
           await eventsCollection.updateOne(
             { _id: new ObjectId(eventId), maxAttendees: { $gt: 0 } },
